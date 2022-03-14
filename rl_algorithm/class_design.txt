@@ -1,0 +1,19 @@
+Refer to: https://app.diagrams.net/?src=about#Hjgwak1%2Fresearch_problem_frameworks%2Fmain%2FHybrid_MBMF_MetaRL.drawio
+
+
+[Hybrid MBMF Class] <-- This is for simple RL. For MetaRL, later could use vector of class-instances.
+
+   Member Variables
+      1. Environment <-- Try one of Mujoco envs
+      2. MFAC <-- SB3 RL-Agent that uses Actor-Critic (Ex: DDPG, SAC, TD3), which will be trained with only real-data
+      3. MBAC <-- SB3 RL-Agent that uses Actor-Critic (Ex: DDPG, SAC, TD3), which will be trained with both real-data and virtual-data
+      4. Model <-- Dynamics+Reward Model trained with real-data and generates virtual-data.  
+      5. Real-Data-Buffer
+      6. Virtual-Data-Buffer
+
+   Member Functions
+      ActionSelector <-- Selects between actions suggested by "MFAC" and "MBAC"
+      Supervise <-- MF-Critic is used to distinguish virtual-transitions that are "better than nothing" and "worse than nothing" 
+      Train <-- Loop of training.
+
+
