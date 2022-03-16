@@ -1,7 +1,9 @@
 from stable_baselines3.common.buffers import ReplayBuffer
 
 
-class DataBuffer(ReplayBuffer):
+#class DataBuffer(ReplayBuffer):
+
+class DataBuffer( ReplayBuffer ):
 
       '''
       For "Real-Transition-Data-Buffer" and "Virtual-Transition-Data-Buffer".
