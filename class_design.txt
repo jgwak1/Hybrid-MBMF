@@ -13,7 +13,7 @@ Refer to: https://app.diagrams.net/?src=about#Hjgwak1%2Fresearch_problem_framewo
 
    Member Functions
       ActionSelect <-- Selects between actions suggested by "MFAC" and "MBAC"
-      Assess <-- MF-Critic is used to distinguish virtual-transitions that are "better than nothing" and "worse than nothing" 
+      SortOut <-- MF-Critic is used to distinguish virtual-transitions that are "better than nothing" and "worse than nothing" 
       Train <-- Loop of training.
       Test <-- Test the MBAC.
 

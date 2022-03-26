@@ -6,89 +6,70 @@
 #           mujoco: https://gym.openai.com/envs/#mujoco  
 
 '''
-TODOs:
-   (Q1) How can 2 separate RL Algorithms communicate with single env, as our scheme?
-   (A1) Perhaps look into using "train()" mem-func instead of "learn()" in SB3-RL-algorithm-impl.
-        Basically, "model.learn()" corresponds to a training-loop, which is comprised of 2 steps of:
-        step-1: "model.collect_rollouts()" use the current policy in the environment, fill the rollout/replay buffer.
-        step-2: "model.train()" opttimize the actor/critic networks, update the target networks.
-        Great Reference is in "SB3 Document :: Chapter 1 :: page 80"
-        > I think it is possible to implement my scheme, 
-          if I appropriately use 
-          - RL agent's predict() 
-          - environment's step() 
-          - fill out RL agent's 
-            - Rollout(for OnPolicy) <-- self.rollout_buffer (Source: https://github.com/DLR-RM/stable-baselines3/blob/e88eb1c9ca98650f802409e5845e952c39be9e76/stable_baselines3/common/on_policy_algorithm.py#L111)
-            - Replay Buffer(for OffPolicy)  <-- self.replay_buffer (Source: https://github.com/DLR-RM/stable-baselines3/blob/e88eb1c9ca98650f802409e5845e952c39be9e76/stable_baselines3/common/off_policy_algorithm.py#L213 )
-        
-   (Q2) What kind of "Dynamics-Reward Model : P_{\theta}(s',r | s,a)" would I use and how should it be trained?
-
-   (Q3) What would the pseudo-code for "Train()" look like?
-   (A3) In-progress. However, would need to determine how and when to train Model and MBAC
-
-   (Q4) How can my scheme (training MFAC with only real-data, and training MBAC with both real and virtual data)
-        harmonize with off-policy (replay-buffer) learning especially for MBAC?
-
-
-
-         
-
-         Need to call "model.train()" instead of "model.learn()" to gain control of the "data-collection and distribution" part
-         and implement my pseudocode which requires gaining control of when and where to 'train;, 
-         since "model.learn()" is for doing both data-collection and training for a single RL-Agent.
-
-         "model.train()"
-            - 'SB3 off-policy algorithm' : https://github.com/DLR-RM/stable-baselines3/blob/009bb0549ad0c9c1130309d95529a237e126578c/stable_baselines3/common/off_policy_algorithm.py#L379
-               >  def train(self, gradient_steps: int, batch_size: int) -> None:
-                  """
-                  Sample the replay buffer and do the updates
-                  (gradient descent and update target networks)
-                  """
-                  #NOTE: gradient_steps=-1 to perform as many gradient steps as transitions collected
-                  #NOTE: ** To actually do training with model.train(), would need to manipuate "replay_buffer" member variable.
-                         **   For TD3, DDPG: https://github.com/DLR-RM/stable-baselines3/blob/009bb0549ad0c9c1130309d95529a237e126578c/stable_baselines3/td3/td3.py#L148
-                         **   For SAC      : https://github.com/DLR-RM/stable-baselines3/blob/009bb0549ad0c9c1130309d95529a237e126578c/stable_baselines3/sac/sac.py#L199
-
-            - 'SB3 on-policy algorithm'  : https://github.com/DLR-RM/stable-baselines3/blob/009bb0549ad0c9c1130309d95529a237e126578c/stable_baselines3/common/on_policy_algorithm.py#L221
-               >  def train(self) -> None:
-                  """
-                  Consume current rollout data and update policy parameters.
-                  Implemented by individual algorithms.
-                  """
-         
-
-
+   [Questions]
+   1. How can my scheme (training MFAC with only real-data, and training MBAC with both real and virtual data)
+      harmonize with off-policy (replay-buffer) learning especially for MBAC?
 '''
 # external imports
+from tabnanny import verbose
+from webbrowser import Grail
 from stable_baselines3.ddpg import DDPG
 from stable_baselines3.sac import SAC
 from stable_baselines3.td3 import TD3
 import gym
 
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutReturn, Schedule, TrainFreq, TrainFrequencyUnit
+from stable_baselines3.common.evaluation import evaluate_policy
+
+
 from typing import NewType, Union, Optional, Dict
 from collections import defaultdict
+import numpy as np
+from torch import _linalg_inv_out_helper_
 # internal imports
 from rl_algorithm.data_buffer import DataBuffer
+
+from utils.misc import Test
 
 class hybrid_mbmf:
 
    def __init__(self,
                 env: gym.Env,
-                AC_Type: Union[DDPG, SAC, TD3], # Let's assume that AC-agent used for MBAC and MFAC are the same.
+                AC_Type: Union[DDPG, SAC, TD3], # Let's assume that AC-agent used for MBAC and MFAC are the same, and offpolicy agents.
                 AC_kwargs: Dict = {},
                 training_steps: int = 1000,
+                learning_starts: int = 100,
+                gradient_steps: int = 100,
+                train_freq = (1, "step"),
+                seed = 0,
                 ) -> None:
 
+               # for training
+               self.training_steps = training_steps
+               self.seed = seed 
+               self.learning_starts = learning_starts
+               self.gradient_steps = gradient_steps
+               self.train_freq = TrainFreq(train_freq[0], TrainFrequencyUnit(train_freq[1])) # for compatibility with SB3 train()
+
                # training environment
-               self.env = env
+               self.env = DummyVecEnv([lambda: env]) # for compatiblity with SB3 train()
                # Model-Free Actor-Critic RL Algorithms that are each trained with only real-data, and both real-data and virtual-data. 
                self.AC_Type = AC_Type
-               self.kwargs = {"policy": "MlpPolicy"} # by default, 'MlpPolicy'
-               self.kwargs.update( AC_kwargs )
-               self.MFAC = self.AC_Type(env = self.env, **self.kwargs)
-               self.MBAC = self.AC_Type(env = self.env, **self.kwargs)
-               # Dyanmics-Model
-               ''' TODO ! Need to first choose what type of Model I need to use!!! '''
+               self.offpolicy_kwargs = {
+                                        "policy": "MlpPolicy", 
+                                        "env": self.env,
+                                        "learning_starts": self.learning_starts,
+                                        "gradient_steps": self.gradient_steps,
+                                        "seed": self.seed,
+                                        "verbose": 2
+                                        } 
+               self.offpolicy_kwargs.update( AC_kwargs )
+               
+               self.MFAC = self.AC_Type(**self.offpolicy_kwargs)
+               self.MBAC = self.AC_Type(**self.offpolicy_kwargs)
+
+               # T,R Model
                self.Model = None    
 
                # Following 'DataBuffers' are "external" databuffers which each store real data and virtual data.
@@ -97,74 +78,148 @@ class hybrid_mbmf:
                self.RealDataBuffer = DataBuffer(buffer_size=int(1e4), observation_space=env.observation_space, action_space= env.action_space) 
                self.VirtualDataBuffer = DataBuffer(buffer_size=int(1e4), observation_space=env.observation_space, action_space= env.action_space)
                
-               # for training
-               self.training_steps = training_steps
 
                return
 
 
    def MBMFAction(self, current_obs, current_timestep):
-      ''' Selects between actions suggested by MFAC and MBAC. '''
-      # Version-1: Perhaps could favor MFAC's decision earlier and favor MBAC's decision later. 
+      ''' 
+      Selects between actions suggested by MFAC and MBAC.
 
-      MB_action, _ = self.MBAC.predict(current_obs, deterministic = False)  # since training, non-deterministic
-      MF_action, _ = self.MFAC.predict(current_obs, deterministic = False)
+      [2022-03-25]
+      I think I should instance-level-override the collect_rollout() of self.MFAC object.
+      This function can be used somewhere in the function-body when overriding collcet_rollout.
+      Goal is to avoid complicating things and try not to mess too much of SB3 code.
+      '''
 
-      selected_action = MF_action
-      #if ( current_timestep / self.training_steps ) > 0.5:
-      #   selected_action = MB_action
-      
-      return selected_action
+      pass
 
 
-   def Assess(self):
+   def SortOut(self):
       ''' MF-Critic distinguishes virtual-data that are "better than nothing" and "worse than nothing" from a 'VirtualDataBatch'. '''
       pass
 
 
-   def Train(self) -> None:
-      ''' '''
+   def Learn(self) -> None:
+      ''' 
+      [Refer to]
+   
+      "MBPO w/ DeepRL" Pseudo-code (Page 6 of "When to Trust Your Model-Based Policy Optimization"; Sergey Levine, et al. NIPS 2019)
+      
+      1. Initialize target-policy, predictive-model 'P_{θ}(s’,r | s,a)', environment-dataset 'D_env', model-dataset 'D_model'.
+      2. For N epochs do:
+      3.    Train predictive-model on D_env via maximum likelihood.
+      4.    For E steps do:
+      5.       Take action in environment according to target-policy; add experience to D_env.
+      6.       for M model-rollouts do:
+      7.          Sample s_{t} uniformly from D_env
+      8.          Perform k-step model-rollout starting from s_{t} using target-policy; add to D_model.
+      9.       for G gradient updates do:
+      10.         Update policy parameters on model-data.  
+      
+      
+      "MBPO Github Repo (by Authors)" : https://github.com/JannerM/mbpo
+      --> Note that MBPO uses a ensemble of models
+      
+      '''
 
-      # Do things in done in model.learn() except for the data-collection part and things specific to my implementation.
-      # param total_timesteps: The total number of samples (env steps) to train on
-      # param eval_env: Environment to use for evaluation. 
-      self.MBAC._setup_learn( total_timesteps = self.training_steps, eval_env = self.env )
-      self.MFAC._setup_learn( total_timesteps = self.training_steps, eval_env = self.env )
-                           
+      '''
+      [2022-03-24 NOTES]
+         TODO:  
+            (4) Model proto-type
+               - Model input layer, output layer 을 input_env로부터 어떻게 받을것인지.
+      '''
 
-      eps= 1
-      eps_rewsum = defaultdict(float)
+      #eps= 1
+      #eps_rewsum = defaultdict(float)
+
+ 
+      _setup_learn_args = { 
+                           "total_timesteps": self.training_steps, "eval_env": self.env,
+                           "callback": None, "eval_freq": -1, "n_eval_episodes": 5,
+                           "log_path": None, "reset_num_timesteps": True
+                          }
+      total_timesteps_MBAC, callback_MBAC = self.MBAC._setup_learn( **_setup_learn_args )
+      total_timesteps_MFAC, callback_MFAC = self.MFAC._setup_learn( **_setup_learn_args )      
+      
+      currstep = 1
+      while currstep < self.training_steps:
+         
+         '''
+         [2022-03-25]
+
+         *** Plans ***
+
+         [1]
+         Override self.MFAC.collect_rollouts() at instance-level, 
+         so that we can just simply insert(incorporate) the "Action-Select" part to the
+         existing collect_rollouts() so that I don't mess things up in there?
+         
+         [ Refer to: https://stackoverflow.com/questions/394770/override-a-method-at-instance-level ]
+
+         [2]
+         Maybe could incorporate the "Model's virtual-data generation" also in the overriding of collect_rollouts()?
+         Virtual-data will anyways be added to MBAC's replay-buffer.
+         
+         Question is:
+             what should be the (s,a) of virtual-data?
+
+         '''
+
+         # MFAC interacting with the model and collecting real-data
+         self.MFAC.collect_rollouts(env = self.env, learning_starts = self.learning_starts, 
+                                    callback = callback_MFAC, 
+                                    train_freq = self.train_freq, replay_buffer = self.MFAC.replay_buffer) 
+         
+         if currstep > 0 and currstep > self.learning_starts:
+            # MFAC being trained with real-data
+            self.MFAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+   
+         currstep += 1
+
+
+      # eval and Test
+      mean_reward, std_reward = evaluate_policy(self.MFAC, env = self.env, n_eval_episodes= 10)
+      print("mean_reward:{}\nstd_reward:{}".format(mean_reward, std_reward))
+      
+      Test( self.MFAC, self.env )
+
+
+      '''
+
+      ********************* FOLLOWING IS OLD WORK THAT DOESN'T WORK *************************************************************
+
       obs = self.env.reset()
-      for step in range( self.training_steps ):
-         action = self.MBMFAction(obs, step)
+      for currstep in range( self.training_steps ):    
+         
+         action = self.MBMFAction(obs, currstep)[0]
          s = obs
          obs, reward, done, info = self.env.step( action )
-         print("[episode: {} | step: {}]\nobs: {}\naction: {}\nnext_obs: {}\nreward: {}\ndone: {}\n\n".format(eps, step, s, action, obs, reward, done))
-         self.RealDataBuffer.add(obs=s, action = action, next_obs= obs, reward= reward, done = done, infos= [{'info': None}])
+         self.MFAC.replay_buffer.add(obs=s, action = action, next_obs= obs, reward= reward, done = done, infos= [{'info': info}] )
+         print("*"*80)
+         print("[episode: {} | step: {}]\n\nobs: {}\n\nnext_obs: {}\n\naction: {}\n\nreward: {}\n\ndone: {}\n\n".format(eps, currstep, s, obs, action, reward, done))
+         # Perhaps store transitions o it as below than above?
+         # https://github.com/DLR-RM/stable-baselines3/blob/00ac43b0a90852eddec31e6f36cac7089c235614/stable_baselines3/common/off_policy_algorithm.py#L521
+         # Store data in replay buffer (normalized action and unnormalized observation)
+         #self.MFAC._store_transition(self.MFAC.replay_buffer, np.array([action]), np.array([obs]), np.array([reward]), np.array([done]), np.array([info]))
          #self.VirtualDataBuffer
          eps_rewsum[str(eps)]+=reward
-
          # train MFAC with only RealData
-         self.MFAC.replay_buffer = self.RealDataBuffer  # perhaps for MFAC, could just add to it's own replay_buffer.
-         if self.MFAC.replay_buffer.size() % 10 == 0:
-            self.MFAC.train(gradient_steps = -1, batch_size = 1000) # gradient_steps=-1 to perform as many gradient steps as transitions collected
-                                                                    # batch_size
-
-         # train Model ( Dynamics-Reward Model: P_{\theta}(s',r | s,a) )
-
+         #self.MFAC.replay_buffer = self.RealDataBuffer  # perhaps for MFAC, could just add to it's own replay_buffer.
+         #if self.MFAC.replay_buffer.size() > 100:
+         #   print("Now we are going to train at step:{} ".format(currstep))
+         
+         self.MFAC.train(gradient_steps = 100, batch_size = 100)  # gradient_stpeps = 1000 은 .learn() 따라하는것임.
+         # train Model ( Dynamics-Reward Model: P_{θ}(s’,r | s,a) )
          # train MBAC with RealData and VirtualData
-
-
          if done:
             eps+=1
-            obs = self.env.reset()
-         
-      return eps_rewsum
+            obs = self.env.reset() 
+      '''   
 
-   def Test(self) -> None:
-       pass
+      return None
 
-
+      
 
 
    # Gets
