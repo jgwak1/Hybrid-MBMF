@@ -1,6 +1,19 @@
 # Refer to: https://github.com/jannerm/mbpo/blob/ac694ff9f1ebb789cc5b3f164d9d67f93ed8f129/mbpo/models/constructor.py#L7
 
 '''
+NOTES
+   [2022-03-25]
+   "Improving Model-Based Deep Reinforcement Learning with "Learning Degree Networks" and Its Application in Robot Control"
+   used MLP (BP-Neural Network) for model. 
+   
+   It also provides loss function and optimizer.
+   
+   **** Look for code. ****
+
+   p.3 : The system dynamics model training uses the BP neural network "supervised learning alogrithm"....
+
+
+
 TODO
    1. Start with implementing two simple neural networks (one for T, one for R) using PyTorch
 

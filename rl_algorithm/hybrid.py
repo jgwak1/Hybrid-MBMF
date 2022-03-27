@@ -63,7 +63,7 @@ class hybrid_mbmf:
                                         "gradient_steps": self.gradient_steps,
                                         "seed": self.seed,
                                         "verbose": 2
-                                        } 
+                                       } 
                self.offpolicy_kwargs.update( AC_kwargs )
                
                self.MFAC = self.AC_Type(**self.offpolicy_kwargs)
@@ -75,6 +75,7 @@ class hybrid_mbmf:
                # Following 'DataBuffers' are "external" databuffers which each store real data and virtual data.
                # Above AC-RL Aents have their own "internal" databuffers ('rollout-buffer' or 'replay-buffer' for used for their learning.
                #  whether to depends 
+               #self.NewRealData = DataBuffer(buffer_size=int(1e4), observation_space=env.observation_space, action_space= env.action_space)
                self.RealDataBuffer = DataBuffer(buffer_size=int(1e4), observation_space=env.observation_space, action_space= env.action_space) 
                self.VirtualDataBuffer = DataBuffer(buffer_size=int(1e4), observation_space=env.observation_space, action_space= env.action_space)
                
@@ -100,22 +101,136 @@ class hybrid_mbmf:
       pass
 
 
+
+
+   def Learn_Dev(self) -> None:
+
+      '''
+      [2022-03-26]
+      PSEUDO-CODE for "Hybrid-MBMF"
+
+   
+      1. Initialize: 
+                   (1)  MFAC { Actor, Critic, Buffer(for Only Real-Data) }                   <--- " Support-Policy "
+                   (2)  MBAC { Actor, Critic, Buffer(for Both Real-Data AND Virtual-Data)}   <--- " Target-Policy "
+                   (3)  MODEL { P_{θ}(s’,r | s,a) }
+                   (4)  Virtual-Data-Buffer  # Basically, Real-Data-Buffer is MFAC::Buffer 
+      
+      2. For N epochs do:
+
+      3.     For I steps do:
+      4.         MFAC interacts with MDP, and collects Real-Data. { Have MFAC very explorative in the beginning. }
+      5.         Train MFAC with Real-Data.
+      6.         Train MODEL using Accumulated Real-Data w/ Supervised Learning.
+
+      7.     For M steps do:
+
+      8.         Generate Virtual-Data using MODEL. 
+                     (1) Sample s_{t} from MFAC::Buffer uniformly at random.
+                     (2) Apply 1 Random Action to sampled s_{t} making it the new s_{t} 
+                         { Reasoning: To have Virtual-Data not starting from the state we already have as Real-Data, but still near. } 
+                     (3) From new s_{t}, step MODEL using MFAC.       
+      9.                 
+      10.    For M steps do:
+      11.         SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
+      12.         Improve the worse-than-nothing virtual data?
+      13.         Train MBAC with sorted-out/imporved data.
+
+      
+      '''
+
+
+
+      _setup_learn_args = { 
+                           "total_timesteps": self.training_steps, "eval_env": self.env,
+                           "callback": None, "eval_freq": -1, "n_eval_episodes": 5,
+                           "log_path": None, "reset_num_timesteps": True
+                          }
+      # Setup ACs
+      total_timesteps_MBAC, callback_MBAC = self.MBAC._setup_learn( **_setup_learn_args )
+      total_timesteps_MFAC, callback_MFAC = self.MFAC._setup_learn( **_setup_learn_args )
+      '''
+
+         [2022-03-26]
+
+         FIRST THINK HOW TO INCORPORATE THE MODEL VIRTUAL DATA GENERATION HERE.
+
+
+         [1]
+         
+         Override self.MFAC.collect_rollouts() at instance-level, 
+         so that we can just simply insert(incorporate) the "Action-Select" part to the
+         existing collect_rollouts() so that I don't mess things up in there?
+         
+         [ Refer to: https://stackoverflow.com/questions/394770/override-a-method-at-instance-level ]
+
+         OR
+
+         Make a child-class for class of self.MFAC, and override collect_rollouts()
+
+      '''
+      currstep = 1
+      while currstep <= self.training_steps:
+         
+         # Data Collection Part
+         # MFAC interacting with the model and collecting real-data
+         self.MFAC.collect_rollouts(callback = callback_MFAC,
+
+                                    env = self.env, 
+                                    learning_starts = self.learning_starts,                                   
+                                    train_freq = self.train_freq, 
+
+                                    replay_buffer = self.MFAC.replay_buffer
+                                   )
+                                    #replay_buffer = self.RealDataBuffer)  # Could collect to our RealDataBuffer instead of "self.MFAC.replay_buffer"
+                                                                          # But this would need training self.MFAC would need to put into self.MFAC.replay_buffer
+                                                                          # This seems redundant.
+                                    
+         
+         ''' [2022-03-26] Write based on the pseudo-code above.'''
+
+         if currstep > 0 and currstep > self.learning_starts:
+            
+            # MFAC being trained with real-data
+            self.MFAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+
+            # MBAC trained by a batch sampled form a buffer that contains both virtual-data and real-data
+            self.MBAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+
+
+         currstep += 1
+
+
+      # eval and Test
+      mean_reward, std_reward = evaluate_policy(self.MFAC, env = self.env, n_eval_episodes= 10)
+      print("mean_reward:{}\nstd_reward:{}".format(mean_reward, std_reward))
+      
+      Test( self.MFAC, self.env )
+
+      return 
+
+
    def Learn(self) -> None:
       ''' 
       [Refer to]
    
       "MBPO w/ DeepRL" Pseudo-code (Page 6 of "When to Trust Your Model-Based Policy Optimization"; Sergey Levine, et al. NIPS 2019)
       
-      1. Initialize target-policy, predictive-model 'P_{θ}(s’,r | s,a)', environment-dataset 'D_env', model-dataset 'D_model'.
+      1. Initialize target-policy, Model 'P_{θ}(s’,r | s,a)', real-dataset 'D_real', model-dataset 'D_virtual'.
+      
       2. For N epochs do:
-      3.    Train predictive-model on D_env via maximum likelihood.
+      3.    Train Model on D_real via maximum likelihood.
+
       4.    For E steps do:
-      5.       Take action in environment according to target-policy; add experience to D_env.
-      6.       for M model-rollouts do:
-      7.          Sample s_{t} uniformly from D_env
-      8.          Perform k-step model-rollout starting from s_{t} using target-policy; add to D_model.
-      9.       for G gradient updates do:
-      10.         Update policy parameters on model-data.  
+      5.       Take action in environment according to target-policy; 
+      7.       Add experience to D_real.
+
+      8.       for M model-rollouts do:
+      9.          Sample s_{t} uniformly from D_real
+      10.         Perform k-step model-rollout starting from s_{t} using target-policy, and add to D_virtual.
+      11.
+      12.      for G gradient updates do:
+      13.         Update target-policy parameters with model-data (D_virtual).  
       
       
       "MBPO Github Repo (by Authors)" : https://github.com/JannerM/mbpo

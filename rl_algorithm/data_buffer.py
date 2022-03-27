@@ -15,7 +15,8 @@ class DataBuffer( ReplayBuffer ):
       Overrides:
       
       Adds:
-
+            Data-Buffer would need functionality to flush low-quality virtual data.
+            Improve virtual data
       '''
 
 
