@@ -13,6 +13,7 @@
 # external imports
 from tabnanny import verbose
 from webbrowser import Grail
+from psutil import virtual_memory
 from stable_baselines3.ddpg import DDPG
 from stable_baselines3.sac import SAC
 from stable_baselines3.td3 import TD3
@@ -29,6 +30,7 @@ import numpy as np
 from torch import _linalg_inv_out_helper_
 # internal imports
 from rl_algorithm.data_buffer import DataBuffer
+from rl_algorithm.model.DR_Model import DynamicsRewardModel
 
 from utils.misc import Test
 
@@ -70,7 +72,7 @@ class hybrid_mbmf:
                self.MBAC = self.AC_Type(**self.offpolicy_kwargs)
 
                # T,R Model
-               self.Model = None    
+               self.Model = DynamicsRewardModel( env = env )    
 
                # Following 'DataBuffers' are "external" databuffers which each store real data and virtual data.
                # Above AC-RL Aents have their own "internal" databuffers ('rollout-buffer' or 'replay-buffer' for used for their learning.
@@ -106,6 +108,26 @@ class hybrid_mbmf:
    def Learn_Dev(self) -> None:
 
       '''
+
+         [2022-03-26]
+
+         FIRST THINK HOW TO INCORPORATE THE MODEL VIRTUAL DATA GENERATION HERE.
+         [1]
+         
+         Override self.MFAC.collect_rollouts() at instance-level, 
+         so that we can just simply insert(incorporate) the "Action-Select" part to the
+         existing collect_rollouts() so that I don't mess things up in there?
+         
+         [ Refer to: https://stackoverflow.com/questions/394770/override-a-method-at-instance-level ]
+
+         OR
+
+         Make a child-class for class of self.MFAC, and override collect_rollouts()
+
+      '''
+
+
+      '''
       [2022-03-26]
       PSEUDO-CODE for "Hybrid-MBMF"
 
@@ -139,55 +161,82 @@ class hybrid_mbmf:
       
       '''
 
-
-
+      # Setups 
       _setup_learn_args = { 
                            "total_timesteps": self.training_steps, "eval_env": self.env,
                            "callback": None, "eval_freq": -1, "n_eval_episodes": 5,
                            "log_path": None, "reset_num_timesteps": True
                           }
-      # Setup ACs
       total_timesteps_MBAC, callback_MBAC = self.MBAC._setup_learn( **_setup_learn_args )
       total_timesteps_MFAC, callback_MFAC = self.MFAC._setup_learn( **_setup_learn_args )
-      '''
-
-         [2022-03-26]
-
-         FIRST THINK HOW TO INCORPORATE THE MODEL VIRTUAL DATA GENERATION HERE.
 
 
-         [1]
+      Epochs = 30
+      Interaction_Steps = 3000
+      VirtualData_Steps = 3000
+      
+      # For N epochs do:
+      for N in range(Epochs):
+         # For I steps do:
+         for I in range(Interaction_Steps):
+
+               # MFAC interacts with MDP, and collects Real-Data. 
+               #  { Have MFAC very explorative in the beginning. }
+               self.MFAC.collect_rollouts(callback = callback_MFAC,
+                                          env = self.env, 
+                                          learning_starts = self.learning_starts,                                   
+                                          train_freq = self.train_freq, 
+                                          replay_buffer = self.MFAC.replay_buffer
+                                       )
+                                          #replay_buffer = self.RealDataBuffer)  # Could collect to our RealDataBuffer instead of "self.MFAC.replay_buffer"
+                                                                              # But this would need training self.MFAC would need to put into self.MFAC.replay_buffer
+                                                                              # This seems redundant.
+
+
+                                          #         :param train_freq: How much experience to collect
+                                          #                            by doing rollouts of current policy.
+                                          #                            Either ``TrainFreq(<n>, TrainFrequencyUnit.STEP)``
+                                          #                            or ``TrainFreq(<n>, TrainFrequencyUnit.EPISODE)``
+                                          #                            with ``<n>`` being an integer greater than 0.
+               
+               # Train MFAC with Real-Data.
+               self.MFAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+               # TODO: Train MODEL using Accumulated Real-Data w/ Supervised Learning
+               self.Model.Train( samples_buffer = self.MFAC.replay_buffer )
          
-         Override self.MFAC.collect_rollouts() at instance-level, 
-         so that we can just simply insert(incorporate) the "Action-Select" part to the
-         existing collect_rollouts() so that I don't mess things up in there?
-         
-         [ Refer to: https://stackoverflow.com/questions/394770/override-a-method-at-instance-level ]
 
-         OR
+         # synchronize MBAC replaybuffer and MFAC replaybuffer
+         self.MBAC.replay_buffer = self.MFAC.replay_buffer
+         for M in range(VirtualData_Steps):
 
-         Make a child-class for class of self.MFAC, and override collect_rollouts()
+            # TODO: 
+            #        Generate Virtual-Data using MODEL.
+            #          (1) Sample s_{t} from MFAC::Buffer uniformly at random. 
+            #          (2) Apply 1 Random Action to sampled s_{t} making it the new s_{t} 
+            #              { Reasoning: To have Virtual-Data not starting from the state we already have as Real-Data, but still near. }
+            #          (3) From new s_{t}, step MODEL using MFAC.    
+            # 
+            #           SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
+            #           Improve the worse-than-nothing virtual data?
+            #           Train MBAC with sorted-out/imporved data.
+
+            # virtual_data = Model.generate_virtual()
+            # SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
+            #
+            #self.MBAC.replay_buffer.add( virtual_data )
+            self.MBAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+
+
+            pass
+
+
+
 
       '''
       currstep = 1
       while currstep <= self.training_steps:
-         
-         # Data Collection Part
-         # MFAC interacting with the model and collecting real-data
-         self.MFAC.collect_rollouts(callback = callback_MFAC,
-
-                                    env = self.env, 
-                                    learning_starts = self.learning_starts,                                   
-                                    train_freq = self.train_freq, 
-
-                                    replay_buffer = self.MFAC.replay_buffer
-                                   )
-                                    #replay_buffer = self.RealDataBuffer)  # Could collect to our RealDataBuffer instead of "self.MFAC.replay_buffer"
-                                                                          # But this would need training self.MFAC would need to put into self.MFAC.replay_buffer
-                                                                          # This seems redundant.
-                                    
-         
-         ''' [2022-03-26] Write based on the pseudo-code above.'''
+      
+         # [2022-03-26] Write based on the pseudo-code above.
 
          if currstep > 0 and currstep > self.learning_starts:
             
@@ -199,7 +248,7 @@ class hybrid_mbmf:
 
 
          currstep += 1
-
+      '''
 
       # eval and Test
       mean_reward, std_reward = evaluate_policy(self.MFAC, env = self.env, n_eval_episodes= 10)

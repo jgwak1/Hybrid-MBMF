@@ -48,8 +48,9 @@ def main():
                            learning_starts = learning_starts,
                            gradient_steps = gradient_steps,
                            seed =seed)  # 1000000 : 1000 episodes
-      hybrid.Learn()
-      
+      #hybrid.Learn()
+      hybrid.Learn_Dev()
+
       #episode_rewardsum = hybrid.Learn()
       #episode_reward_plotter( episode_reward_dict = episode_rewardsum, 
       #                        rl_info_dict = hybrid.get_rl_info() )
