@@ -115,7 +115,7 @@ class DynamicsRewardModel(nn.Module):
       return out
       
 
-   def Train(self, samples_buffer: ReplayBuffer ) -> None:
+   def Train(self, samples_buffer: ReplayBuffer, epoch: int) -> None:
    
       # References:
       #            https://medium.com/biaslyai/pytorch-introduction-to-neural-network-feedforward-neural-network-model-e7231cff47cb
@@ -158,18 +158,26 @@ class DynamicsRewardModel(nn.Module):
          X = batch["X"].to(torch.float32)
          y = batch["y"].to(torch.float32)
          optimizer.zero_grad()
-         y_prime = self(X)
+         y_prime = self(X) 
          loss = loss_function(input= y_prime, target= y)
          loss.backward() # auto-grad   
          optimizer.step()
+
+         if batch_idx % 10 == 0:
+            print("epoch: {} [{}/{} ({:.0f}%)]\t training loss:{:.6f}".format( epoch, batch_idx, len(train_dataloader), batch_idx/len(train_dataloader), loss.item() ) )
 
       return
 
 
 
-   def predict(self, observation, action):
-      input_ = np.concatenate( (observation, action) , axis = -1)
-      return self( input_ )
+   def predict(self, observation: torch.Tensor, action: torch.Tensor):
+
+      input = torch.cat((observation, action), dim=1).to(torch.float32) 
+      
+      #input = np.concatenate( (observation, action) , axis = -1)
+      #input = torch.from_numpy(input).to(torch.float32)
+      predicted = self(input) # likely calls feedforward
+      return predicted
 
 
    def save_model(self, filepath):

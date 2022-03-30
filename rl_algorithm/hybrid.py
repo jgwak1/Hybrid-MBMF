@@ -18,13 +18,14 @@ from stable_baselines3.ddpg import DDPG
 from stable_baselines3.sac import SAC
 from stable_baselines3.td3 import TD3
 import gym
+import torch
 
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, RolloutReturn, Schedule, TrainFreq, TrainFrequencyUnit
 from stable_baselines3.common.evaluation import evaluate_policy
 
 
-from typing import NewType, Union, Optional, Dict
+from typing import NewType, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
 from torch import _linalg_inv_out_helper_
@@ -43,7 +44,7 @@ class hybrid_mbmf:
                 training_steps: int = 1000,
                 learning_starts: int = 100,
                 gradient_steps: int = 100,
-                train_freq = (1, "step"),
+                train_freq = (1, "episode"), # (1, "step"),
                 seed = 0,
                 ) -> None:
 
@@ -98,11 +99,93 @@ class hybrid_mbmf:
       pass
 
 
-   def SortOut(self):
-      ''' MF-Critic distinguishes virtual-data that are "better than nothing" and "worse than nothing" from a 'VirtualDataBatch'. '''
+   #def SortOut(self, virtual_data_batch: DataBuffer):
+   def SortOut(self,
+               real_obs: torch.Tensor, action: torch.Tensor, 
+               virtual_nextobs: torch.Tensor, virtual_reward: torch.Tensor) -> bool: # returns bool of better-than-nothing or worse-than-nothing
+      
+      ''' 
+      [ Google Docs "Hybrid-MBMF Algorithm Design" ] 
+      Educated-Guess whether the virtual-data is better-than-nothing for training or not. '''
+
+      # Compare 
+      # Coach's [ Q_{MF}(s,a) ] ------ (1)
+      # and
+      # Boxer's [ r + E_{s’~Μ(s,a)} [ γ * Q_{MF}(next_s, π_{MF}(next_s) ) ] ------ (2)
+
+      is_better_than_nothing = False
+
+
+
+      # (1) Q_{MF}(s,a)
+      #real_obs = real_obs.to(dtype=torch.float32)
+      #action = torch.from_numpy(action).to(dtype=torch.float32)
+
+      # self.MFAC.critic doc:
+      '''
+      # Get current Q-values estimates for each critic network
+            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+      '''
+
+      '''
+      Error is coming from     
+      [ torch.modules.nn.flatten.py ]
+            def forward(self, input: Tensor) -> Tensor:
+            return input.flatten(self.start_dim, self.end_dim) <<<< here
+      
+      "real_obs" has to be as following;
+      tensor([[-0.0615,  0.0281, -0.2272, -0.0502,  0.0960,  0.2686, -0.0184, -0.4265,
+         -0.8214,  1.1791,  2.2890,  1.8804, -9.0074, -4.5512,  1.0007, -8.1646,
+         -5.9016]])
+      
+      In other words, it should be "torch.Size([1, 17])" instead of torch.size([17]), when did tensorobj.shape
+      
+      
+      '''
+
+      # Returned "Coach_Q" is 2 q-values from 2 q-networks
+
+      '''
+      < From source: stable-baselines.common.policies.ContinuousCritic >
+      def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
+        # Learn the features extractor using the policy loss only
+        # when the features_extractor is shared with the actor
+        with th.set_grad_enabled(not self.share_features_extractor):
+            features = self.extract_features(obs)
+        qvalue_input = th.cat([features, actions], dim=1)
+        return tuple(q_net(qvalue_input) for q_net in self.q_networks)
+      
+      # By default, it creates two critic networks used to reduce overestimation
+         thanks to clipped Q-learning (cf TD3 paper).
+      
+      '''
+
+      # For some AC methods (like TD3), 
+      # two critic networks are used to reduce overestimation. (a.k.a., clipped Q-learning)
+      # we can just get the minimum of those two.
+      Coach_Q = min( self.MFAC.critic( real_obs, action ) )# Get "Q_{MF}( real_obs, action )"      
+      Coach_Q = Coach_Q.item()
+   
+      # (2) r + E_{s’~Μ(s,a)} [ γ * Q_{MF}(next_s, π_{MF}(next_s) )
+      discount_rate = self.MFAC.gamma
+      virtual_reward_scalar = virtual_reward.item()
+      next_Q = min( self.MFAC.critic( virtual_nextobs, self.MFAC.actor( virtual_nextobs ) ) )
+      next_Q_scalar = next_Q.item()
+      Boxer_Q = virtual_reward_scalar + ( discount_rate * next_Q_scalar )
+
+      print(f"SortOut\n\tCoach_Q: {Coach_Q}\n\tBoxer_Q: {Boxer_Q}")
+
+
+      ''' Dinstinguish "better than nothing" and "worse than nothing" from a 'VirtualDataBatch'. '''
+      
+      return is_better_than_nothing
+
+
+   def Improve(self, real_obs, action, virtual_nextobs, virtual_reward) -> Any:
+
+      ''' Improve the worse-than-nothing virtual data '''
+
       pass
-
-
 
 
    def Learn_Dev(self) -> None:
@@ -140,7 +223,7 @@ class hybrid_mbmf:
       
       2. For N epochs do:
 
-      3.     For I steps do:
+      3.     
       4.         MFAC interacts with MDP, and collects Real-Data. { Have MFAC very explorative in the beginning. }
       5.         Train MFAC with Real-Data.
       6.         Train MODEL using Accumulated Real-Data w/ Supervised Learning.
@@ -151,7 +234,7 @@ class hybrid_mbmf:
                      (1) Sample s_{t} from MFAC::Buffer uniformly at random.
                      (2) Apply 1 Random Action to sampled s_{t} making it the new s_{t} 
                          { Reasoning: To have Virtual-Data not starting from the state we already have as Real-Data, but still near. } 
-                     (3) From new s_{t}, step MODEL using MFAC.       
+                     (3) From new s_{t}, step MODEL using MFAC::Actor.       
       9.                 
       10.    For M steps do:
       11.         SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
@@ -176,54 +259,82 @@ class hybrid_mbmf:
       VirtualData_Steps = 3000
       
       # For N epochs do:
-      for N in range(Epochs):
-         # For I steps do:
-         for I in range(Interaction_Steps):
-
-               # MFAC interacts with MDP, and collects Real-Data. 
-               #  { Have MFAC very explorative in the beginning. }
-               self.MFAC.collect_rollouts(callback = callback_MFAC,
-                                          env = self.env, 
-                                          learning_starts = self.learning_starts,                                   
-                                          train_freq = self.train_freq, 
-                                          replay_buffer = self.MFAC.replay_buffer
-                                       )
-                                          #replay_buffer = self.RealDataBuffer)  # Could collect to our RealDataBuffer instead of "self.MFAC.replay_buffer"
-                                                                              # But this would need training self.MFAC would need to put into self.MFAC.replay_buffer
-                                                                              # This seems redundant.
-
-
-                                          #         :param train_freq: How much experience to collect
-                                          #                            by doing rollouts of current policy.
-                                          #                            Either ``TrainFreq(<n>, TrainFrequencyUnit.STEP)``
-                                          #                            or ``TrainFreq(<n>, TrainFrequencyUnit.EPISODE)``
-                                          #                            with ``<n>`` being an integer greater than 0.
-               
-               # Train MFAC with Real-Data.
-               self.MFAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
-               # TODO: Train MODEL using Accumulated Real-Data w/ Supervised Learning
-               self.Model.Train( samples_buffer = self.MFAC.replay_buffer )
+      for N in range(Epochs):   # Try to equate 1 "Epoch" to 1 self.Model.Train function call
          
+         # MFAC interacts with MDP, and collects Real-Data. 
+         #  { Have MFAC very explorative in the beginning. }
+         self.MFAC.collect_rollouts(callback = callback_MFAC,
+                                    env = self.env, 
+                                    learning_starts = self.learning_starts,                                   
+                                    train_freq = self.train_freq, 
+                                    replay_buffer = self.MFAC.replay_buffer
+                                 )
+                                    #replay_buffer = self.RealDataBuffer)  # Could collect to our RealDataBuffer instead of "self.MFAC.replay_buffer"
+                                                                        # But this would need training self.MFAC would need to put into self.MFAC.replay_buffer
+                                                                        # This seems redundant.
 
+
+                                    #         :param train_freq: How much experience to collect
+                                    #                            by doing rollouts of current policy.
+                                    #                            Either ``TrainFreq(<n>, TrainFrequencyUnit.STEP)``
+                                    #                            or ``TrainFreq(<n>, TrainFrequencyUnit.EPISODE)``
+                                    #                            with ``<n>`` being an integer greater than 0.
+         
+         # Train MFAC with Real-Data.
+         self.MFAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
+         # TODO: Train MODEL using Accumulated Real-Data w/ Supervised Learning
+         self.Model.Train( samples_buffer = self.MFAC.replay_buffer, epoch = N ) # could also pass epoch in to here.
+         
          # synchronize MBAC replaybuffer and MFAC replaybuffer
          self.MBAC.replay_buffer = self.MFAC.replay_buffer
+
+
+
          for M in range(VirtualData_Steps):
 
             # TODO: 
-            #        Generate Virtual-Data using MODEL.
-            #          (1) Sample s_{t} from MFAC::Buffer uniformly at random. 
-            #          (2) Apply 1 Random Action to sampled s_{t} making it the new s_{t} 
-            #              { Reasoning: To have Virtual-Data not starting from the state we already have as Real-Data, but still near. }
-            #          (3) From new s_{t}, step MODEL using MFAC.    
-            # 
-            #           SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
-            #           Improve the worse-than-nothing virtual data?
-            #           Train MBAC with sorted-out/imporved data.
+            #        [1] Generate Virtual-Data using MODEL.
+            #           (1-1) Sample s_{t} from MFAC::Buffer uniformly at random. 
+            #           (1-2) From sampled s_{t}, apply 1 Random Action with the MODEL, generating one virtual-data.
+            #                => { Reasoning: To have Virtual-Data starting from the state which we already have in Real-Data but with different action.; near-distribution virtual data }            # 
+            #        [2] SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
+            #        [3] Improve the worse-than-nothing virtual data?
+            #        [4] Train MBAC with sorted-out/imporved data.
 
-            # virtual_data = Model.generate_virtual()
-            # SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
-            #
-            #self.MBAC.replay_buffer.add( virtual_data )
+
+            ''' Implementation '''
+            #[1] Generate Virtual-Data using MODEL.
+            #    (1-1) Sample s_{t} from MFAC::Buffer uniformly at random.
+            #                                                            [Reference]: https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/buffers.py
+            RealData_sample = self.MFAC.replay_buffer.sample(batch_size = 1)
+            #    (1-2) From sampled s_{t}, apply 1 Random Action with the MODEL, generating one virtual-data.
+            #         => { Reasoning: To have Virtual-Data starting from the state which we already have in Real-Data but with different action.; near-distribution virtual data }
+            
+            sampled_realobs = RealData_sample.observations.to(dtype=torch.float32)
+            random_action = torch.from_numpy( self.env.action_space.sample() )
+            random_action = torch.unsqueeze(random_action, axis = 0)
+            #raw_virtual_data = self.Model.predict(observation= sampled_realobs[0], action= random_action)
+            raw_virtual_data = self.Model.predict(observation= sampled_realobs, action= random_action)
+            virtual_nextobs = raw_virtual_data.squeeze()[0:-1].unsqueeze(dim=0) # first to second-last
+            virtual_reward = raw_virtual_data.squeeze()[-1].unsqueeze(dim=0) # last
+            
+            #[2] SortOut better-than-nothing from generated Virtual-Data using MFAC's Critic. { MFAC is Support-Policy }
+            Better_than_Nothing = self.SortOut(real_obs = sampled_realobs, action = random_action, 
+                                               virtual_nextobs = virtual_nextobs, virtual_reward = virtual_reward)
+
+            if Better_than_Nothing:
+                pass
+            else:
+                  #[3] Improve the worse-than-nothing virtual data?
+                  pass
+         
+
+            # 
+            # self.MBAC.replay_buffer.extend( virtual_data )
+            # 
+
+            #[4] Train MBAC with sorted-out/imporved data.
+            #self.MBAC.replay_buffer.extend()    # extend: Add a new batch of transitions to the buffer             
             self.MBAC.train(gradient_steps = self.gradient_steps, batch_size = 100)
 
 
